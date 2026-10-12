@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """ICRAP 공개 API(/api/v1) 클라이언트. 표준 라이브러리만 쓴다(Python 3.8+).
 
+로그인(토큰 인증):
+  icrap login   토큰을 화면에 보이지 않게 입력받아 포털에 확인한 뒤 저장한다(파이프로 줘도 된다).
+                읽기 토큰(본인이 포털 → 계정 → API 토큰에서 발급)은 ~/.config/icrap/token,
+                쓰기 토큰(관리자가 발급)은 ~/.config/icrap/write-token 에 둔다. 스코프를 보고 자리를 정한다.
+  조회는 읽기 토큰을, 잡 제출·취소와 워크스페이스 시작·정지는 쓰기 토큰을 쓴다(없으면 다른 쪽으로 대신한다).
+
 설정(환경 변수):
   ICRAP_URL    포털 주소. 기본 https://icrap.blueodor.xyz
-  ICRAP_TOKEN  API 토큰(rp_...). 없으면 ~/.config/icrap/token 파일의 첫 줄을 읽는다.
+  ICRAP_TOKEN  API 토큰(rp_...). 주면 저장된 토큰 대신 이것 하나만 쓴다.
   (RP_BASE·RP_TOKEN 도 같은 뜻으로 받는다 — docs/api.md 예시와 같은 이름이다.)
 
 종료 코드: 0 성공 · 1 API 오류 · 2 설정·사용법 오류 · 3 잡이 실패로 끝남(wait)
@@ -11,6 +17,7 @@
 토큰 원문은 어디에도 출력하지 않는다.
 """
 import argparse
+import getpass
 import json
 import os
 import sys
@@ -20,7 +27,17 @@ import urllib.parse
 import urllib.request
 
 DEFAULT_URL = "https://icrap.blueodor.xyz"
-TOKEN_FILE = os.path.expanduser("~/.config/icrap/token")
+TOKEN_DIR = os.path.expanduser("~/.config/icrap")
+TOKEN_FILE = os.path.join(TOKEN_DIR, "token")              # 읽기 토큰
+WRITE_TOKEN_FILE = os.path.join(TOKEN_DIR, "write-token")  # 쓰기 토큰(read 스코프도 함께 든다)
+WRITE_SCOPES = ("jobs:write", "workspaces:write")
+# 안내에 실제 설치 위치를 쓴다(프로젝트의 .claude/skills 에 설치했을 수도 있다).
+_SELF = os.path.abspath(__file__)
+_HOME = os.path.expanduser("~")
+LOGIN_CMD = "python3 " + ("~" + _SELF[len(_HOME):] if _SELF.startswith(_HOME + os.sep) else _SELF) + " login"
+LOGIN_HINT = f"터미널에서 `{LOGIN_CMD}` 을 실행해 토큰을 입력하세요"
+WRITE_HINT = ("쓰기 토큰은 관리자만 발급합니다. 관리자에게 필요한 스코프(jobs:write, workspaces:write)로 발급을 요청하고, "
+              f"받은 토큰은 터미널에서 `{LOGIN_CMD}` 을 실행해 입력하세요.")
 TERMINAL_PHASES = ("succeeded", "failed")
 MIN_POLL_SECONDS = 30  # 포털이 이미 5초마다 수집한다. 외부 폴링은 30초 이상(docs/api.md "폴링").
 
@@ -58,22 +75,34 @@ def base_url():
     return (os.environ.get("ICRAP_URL") or os.environ.get("RP_BASE") or DEFAULT_URL).rstrip("/")
 
 
-def token():
-    t = os.environ.get("ICRAP_TOKEN") or os.environ.get("RP_TOKEN")
-    if not t and os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, encoding="utf-8") as f:
-            t = f.readline().strip()
+def env_token():
+    return os.environ.get("ICRAP_TOKEN") or os.environ.get("RP_TOKEN")
+
+
+def file_token(path):
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return f.readline().strip() or None
+
+
+def token(write=False):
+    """조회는 읽기 토큰, 쓰기는 쓰기 토큰을 먼저 쓴다. 쓰기 토큰이 없으면 읽기 토큰으로 보내고 서버의 insufficient_scope 를 안내로 바꾼다."""
+    t = env_token()
     if not t:
-        die(f"토큰이 없습니다. ICRAP_TOKEN 을 설정하거나 {TOKEN_FILE} 에 넣으세요(포털 → 계정 → API 토큰).")
+        r, w = file_token(TOKEN_FILE), file_token(WRITE_TOKEN_FILE)
+        t = (w or r) if write else (r or w)
+    if not t:
+        die(f"로그인되어 있지 않습니다. 포털 → 계정 → API 토큰에서 읽기 토큰을 발급하고, {LOGIN_HINT}.")
     if not t.startswith("rp_"):
         die("토큰 형식이 아닙니다(rp_ 로 시작해야 합니다).")
     return t
 
 
-def call(method, path, body=None):
+def call(method, path, body=None, tok=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base_url() + path, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {token()}")
+    req.add_header("Authorization", f"Bearer {tok or token(write=method != 'GET')}")
     req.add_header("Accept", "application/json")
     if data is not None:
         req.add_header("Content-Type", "application/json")
@@ -115,17 +144,121 @@ def fmt_job(j):
     return line
 
 
+# ---------- 로그인 ----------
+
+def is_write(scopes):
+    return any(s in scopes for s in WRITE_SCOPES)
+
+
+def save_token(path, t):
+    os.makedirs(TOKEN_DIR, mode=0o700, exist_ok=True)
+    os.chmod(TOKEN_DIR, 0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(t + "\n")
+    os.chmod(path, 0o600)
+
+
+def describe(me, label):
+    u, t = me["user"], me["token"]
+    line = f"{label}: {u['email']} · 토큰 '{t['name']}' · 스코프 {','.join(t['scopes'])} · {t['daysRemaining']}일 남음({t['expiresAt'][:10]})"
+    if t["daysRemaining"] <= 14:
+        line += "\n  ⚠️ 곧 만료됩니다. " + ("관리자에게 재발급을 요청하세요." if is_write(t["scopes"]) else "포털 → 계정 → API 토큰에서 새로 발급하세요.")
+    return line
+
+
+def cmd_login(a):
+    if sys.stdin.isatty():
+        try:
+            raw = getpass.getpass("ICRAP API 토큰(rp_..., 입력은 화면에 보이지 않습니다): ")
+        except (EOFError, KeyboardInterrupt):
+            die("입력을 취소했습니다.")
+    else:
+        raw = sys.stdin.readline()
+    t = raw.strip()
+    if not t:
+        die(f"토큰이 입력되지 않았습니다. 대화형 입력이 안 되는 곳이면 {LOGIN_HINT}.")
+    if not t.startswith("rp_"):
+        die("토큰 형식이 아닙니다(rp_ 로 시작해야 합니다). 저장하지 않았습니다.")
+    try:
+        _, me = call("GET", "/api/v1/me", tok=t)
+    except ApiError as e:
+        die(f"포털이 이 토큰을 받지 않았습니다({e.code}). 폐기·만료되지 않았는지 포털 → 계정 → API 토큰에서 확인하세요. 저장하지 않았습니다.", 1)
+    write = is_write(me["token"]["scopes"])
+    path = WRITE_TOKEN_FILE if write else TOKEN_FILE
+    other_path = TOKEN_FILE if write else WRITE_TOKEN_FILE
+    other = file_token(other_path)
+    if other:
+        try:
+            _, other_me = call("GET", "/api/v1/me", tok=other)
+            if other_me["user"]["email"] != me["user"]["email"]:
+                print(f"⚠️ 저장된 {'읽기' if write else '쓰기'} 토큰은 다른 계정({other_me['user']['email']})의 것입니다. "
+                      f"`icrap logout --{'read' if write else 'write'}` 로 지우세요.", file=sys.stderr)
+        except ApiError:
+            pass  # 만료·폐기된 다른 쪽 토큰은 me 가 알려 준다.
+    save_token(path, t)
+    print(describe(me, "쓰기 토큰 저장" if write else "읽기 토큰 저장"))
+    print(f"  위치: {path}")
+    if write:
+        print("  잡 제출·취소, 워크스페이스 시작·정지에 이 토큰을 씁니다." +
+              ("" if file_token(TOKEN_FILE) else " 읽기 토큰이 따로 없으므로 조회에도 씁니다."))
+    else:
+        print("  조회(클러스터·잡·로그·워크스페이스 목록)에 이 토큰을 씁니다. 잡 제출 같은 쓰기 작업은 이 토큰으로 할 수 없습니다.")
+        print("  " + WRITE_HINT)
+    if env_token():
+        print("⚠️ ICRAP_TOKEN 환경 변수가 설정되어 있어 저장한 토큰 대신 그것을 씁니다.", file=sys.stderr)
+
+
+def cmd_logout(a):
+    targets = {"read": [TOKEN_FILE], "write": [WRITE_TOKEN_FILE]}.get(a.which, [TOKEN_FILE, WRITE_TOKEN_FILE])
+    removed = []
+    for p in targets:
+        if os.path.exists(p):
+            os.remove(p)
+            removed.append(p)
+    print("지웠습니다: " + ", ".join(removed) if removed else "지울 토큰이 없습니다.")
+    if removed:
+        print("이 컴퓨터에서만 지웠습니다. 토큰 자체를 무효로 하려면 포털 → 계정 → API 토큰에서 폐기하세요.")
+
+
 # ---------- 읽기 ----------
 
 def cmd_me(a):
-    _, body = call("GET", "/api/v1/me")
+    env = env_token()
+    slots = [("ICRAP_TOKEN 환경 변수", env)] if env else [
+        ("읽기 토큰", file_token(TOKEN_FILE)), ("쓰기 토큰", file_token(WRITE_TOKEN_FILE))]
+    slots = [(label, t) for label, t in slots if t]
+    if not slots:
+        token()  # 로그인 안내를 내고 끝난다.
+    results, by_token = [], {}
+    for label, t in slots:
+        try:
+            _, me = call("GET", "/api/v1/me", tok=t)
+            results.append((label, me, None))
+            by_token[t] = me["token"]["scopes"]
+        except ApiError as e:
+            results.append((label, None, e))
+    # 실제로 쓰일 토큰 기준이다: 조회는 읽기 토큰이 무효면 쓰기 토큰으로 넘어가지 않는다.
+    read_scopes = by_token.get(token(write=False), [])
+    write_scopes = by_token.get(token(write=True), [])
     if a.json:
-        return out(body)
-    u, t = body["user"], body["token"]
-    print(f"{u['email']} ({u['role']})")
-    print(f"토큰 '{t['name']}' 스코프 {','.join(t['scopes'])} · {t['daysRemaining']}일 남음({t['expiresAt'][:10]})")
-    if t["daysRemaining"] <= 14:
-        print("⚠️ 토큰이 곧 만료됩니다. 포털 → 계정 → API 토큰에서 새로 발급하세요.")
+        return out([{"slot": label, **(me or {"error": {"code": e.code, "message": e.message}})} for label, me, e in results])
+    first = next((me for _, me, _ in results if me), None)
+    if first:
+        print(f"{first['user']['email']} ({first['user']['role']}) · {base_url()}")
+    for label, me, e in results:
+        if me:
+            print(describe(me, label))
+        else:
+            print(f"{label}: 쓸 수 없음({e.code}). " + ("관리자에게 재발급을 요청하세요." if "쓰기" in label else f"새로 발급해 {LOGIN_HINT}."))
+    can = ["조회"] if "read" in read_scopes else []
+    can += ["잡 제출·취소"] if "jobs:write" in write_scopes else []
+    can += ["워크스페이스 시작·정지"] if "workspaces:write" in write_scopes else []
+    print("할 수 있는 일: " + (", ".join(can) or "없음"))
+    if not is_write(write_scopes):
+        print("쓰기 작업(잡 제출·취소, 워크스페이스 시작·정지)을 하려면: " + WRITE_HINT)
+    if not can:
+        sys.exit(1)
 
 
 def cmd_cluster(a):
@@ -340,7 +473,12 @@ def main():
     def add(name, **k):
         return sub.add_parser(name, parents=[common], **k)
 
-    add("me", help="내 계정과 토큰 스코프·만료").set_defaults(fn=cmd_me)
+    add("login", help="API 토큰을 입력받아 확인하고 저장한다(읽기·쓰기 자리는 스코프로 정한다)").set_defaults(fn=cmd_login)
+    s = add("logout", help="저장한 토큰을 이 컴퓨터에서 지운다")
+    s.add_argument("--read", dest="which", action="store_const", const="read", help="읽기 토큰만")
+    s.add_argument("--write", dest="which", action="store_const", const="write", help="쓰기 토큰만")
+    s.set_defaults(fn=cmd_logout, which="all")
+    add("me", help="로그인한 계정, 토큰별 스코프·만료, 할 수 있는 일").set_defaults(fn=cmd_me)
     add("cluster", help="노드·팀 큐·GPU 점유 현황").set_defaults(fn=cmd_cluster)
     add("templates", help="워크스페이스 템플릿과 스펙").set_defaults(fn=cmd_templates)
     add("workspaces", help="내 워크스페이스 목록").set_defaults(fn=cmd_workspaces)
@@ -389,6 +527,10 @@ def main():
         a.fn(a)
     except ApiError as e:
         print(json.dumps({"status": e.status, "code": e.code, "message": e.message}, ensure_ascii=False), file=sys.stderr)
+        if e.code == "insufficient_scope":
+            print(f"icrap: 이 작업에는 쓰기 토큰이 필요합니다. {WRITE_HINT}", file=sys.stderr)
+        elif e.code in ("invalid_token", "token_expired"):
+            print(f"icrap: 토큰이 폐기됐거나 만료됐습니다. `icrap me` 로 어느 토큰인지 확인하고, 새 토큰을 받아 {LOGIN_HINT}.", file=sys.stderr)
         sys.exit(1)
 
 

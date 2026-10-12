@@ -22,15 +22,31 @@ ICRAP 은 연구팀의 온프렘 GPU 클러스터(RTX A5000 24GB ×2대, RTX 508
 icrap me
 ```
 
-- `토큰이 없습니다` → 사용자에게 토큰을 요청한다. 읽기 토큰은 사용자가 포털 → `계정` → `API 토큰` 에서 직접 발급하고,
-  **잡 제출·워크스페이스 시작·정지에 필요한 쓰기 토큰은 관리자만 발급한다.** 토큰은 사용자가
-  `~/.config/icrap/token`(권한 600)에 넣거나 `ICRAP_TOKEN` 환경 변수로 준다.
-- 출력의 스코프를 보고 할 수 있는 일을 정한다: `read` 만 있으면 조회만, `jobs:write` 가 있으면 잡 제출·취소,
-  `workspaces:write` 가 있으면 워크스페이스 시작·정지.
+ICRAP 은 사용자 본인 계정의 **API 토큰**으로 로그인한다. 토큰은 두 종류다.
+
+| 토큰 | 누가 발급하나 | 할 수 있는 일 | 저장 위치 |
+|---|---|---|---|
+| 읽기(`read`) | 사용자 본인: 포털 → `계정` → `API 토큰` | 클러스터·템플릿·내 워크스페이스·내 잡·잡 로그 조회 | `~/.config/icrap/token` |
+| 쓰기(`jobs:write`, `workspaces:write`) | **관리자만** | 위의 조회 + 잡 제출·취소(`jobs:write`), 워크스페이스 시작·정지(`workspaces:write`) | `~/.config/icrap/write-token` |
+
+클라이언트는 조회에 읽기 토큰을, 쓰기 작업에 쓰기 토큰을 쓴다. `icrap me` 출력의 `할 수 있는 일` 을 보고 무엇을 할지 정한다.
+
+- `로그인되어 있지 않습니다` → 사용자에게 포털에서 읽기 토큰을 발급하고 **사용자 자신의 터미널에서**
+  `python3 ~/.claude/skills/icrap/scripts/icrap.py login` 을 실행해 입력하라고 안내하고 기다린다(입력은 화면에 보이지 않는다).
+  `login` 은 토큰을 포털에 확인한 뒤 스코프를 보고 읽기·쓰기 자리에 저장한다. Claude 가 직접 `login` 을 실행하면
+  입력을 받을 수 없어 실패한다. 사용자가 Claude Code 에서 `! <명령>` 으로 실행해도 입력 창이 뜨지 않을 수 있으니
+  별도 터미널을 권한다.
+- 쓰기 작업이 필요한데 `할 수 있는 일` 에 없다(`insufficient_scope`) → 우회하지 말고 사용자에게 알린다:
+  "관리자에게 `jobs:write`(필요하면 `workspaces:write`) 쓰기 토큰 발급을 요청하고, 받은 토큰을 같은 `login` 으로 입력하세요."
+  쓰기 토큰을 기다리는 동안 할 수 있는 조회·준비(저장소 정리, 명령 확인)는 계속한다.
+- 로그아웃은 `icrap logout`(`--read`·`--write` 로 한쪽만)이다. 이 컴퓨터의 파일만 지우므로, 토큰 자체를 무효로 하려면
+  포털 → `계정` → `API 토큰` 에서 폐기하라고 알린다.
+- `ICRAP_TOKEN` 환경 변수를 주면 저장된 토큰 대신 그것 하나만 쓴다(CI 용).
 - 기본 주소는 공개 도메인 `https://icrap.blueodor.xyz` 다. 다른 주소를 써야 하면 `ICRAP_URL` 로 바꾼다.
 
-⚠️ 토큰 원문을 출력하거나, 파일·커밋·로그에 쓰거나, 명령줄 인자로 넘기지 않는다. 토큰을 대화창에 붙여 넣으면
-파일에 저장해 주고 그 뒤로는 다시 말하지 않는다.
+⚠️ 토큰을 대화창에 붙여 달라고 요청하지 않는다. 토큰 원문을 출력하거나, 파일·커밋·로그에 쓰거나, 명령줄 인자로 넘기지 않는다.
+사용자가 그래도 대화창에 붙여 넣었다면 `icrap login <<'EOF'` 처럼 표준 입력으로 저장해 주고 다시 말하지 않으며,
+대화 기록에 남았으니 포털에서 그 토큰을 폐기하고 새로 발급하기를 권한다.
 
 ## 1. 배치 잡으로 학습 돌리기
 
@@ -114,16 +130,21 @@ icrap ws-stop <이름>        # 정지(보통 10초). 홈·/data 는 남는다
 - 워크스페이스 만들기·삭제는 API 에 없다. 포털 `워크스페이스` 화면에서 사용자가 한다.
 - 이미 그 상태면 아무것도 바꾸지 않고 성공으로 끝난다. `transition_in_progress` 면 잠시 뒤 다시 부른다.
 
-### 워크스페이스 안에서 명령 돌리기(coder CLI)
+### 워크스페이스 안에서 명령 돌리기(SSH)
 
-워크스페이스에 들어가 파일을 보거나 짧은 명령을 돌릴 때는 coder CLI 를 쓴다. 설치·로그인은 사용자가 한 번 해야 한다
-([reference.md](reference.md#coder-cli-준비)). 로그인 전에 포털에서 워크스페이스 `열기` 를 한 번 눌러야 한다.
+워크스페이스에 SSH 로 들어가 파일을 보거나 명령을 돌릴 때는 `icrap-run` 스킬의 `ws.py` 를 쓴다(coder CLI 위에서 돈다).
+공개 주소 `https://coder.blueodor.xyz` 로 되므로 Tailscale 은 필요 없다. coder CLI 설치와 `coder login` 은 사용자가
+자기 터미널에서 한 번 한다([reference.md](reference.md#coder-cli-준비)). Claude 는 세션 토큰을 받거나 다루지 않는다.
 
 ```bash
-coder list
-coder ssh <워크스페이스> -- 'ls /shared/runs/<내 이름>/resnet-lr3e4/'    # 잡 결과물 확인
-coder ssh <워크스페이스> -- 'tail -n 50 /shared/runs/<내 이름>/resnet-lr3e4/stdout.log'   # 선점 전 기록까지
+ws=~/.claude/skills/icrap-run/scripts/ws.py
+python3 $ws check                                                        # 로그인·내 워크스페이스 상태(처음 한 번)
+python3 $ws exec <워크스페이스> -- 'ls /shared/runs/<내 이름>/resnet-lr3e4/'   # 잡 결과물 확인
+python3 $ws exec <워크스페이스> -- 'tail -n 50 /shared/runs/<내 이름>/resnet-lr3e4/stdout.log'   # 선점 전 기록까지
 ```
+
+`check` 나 다른 명령이 로그인 안내(종료 코드 3)를 내면 그 안내를 사용자에게 그대로 전하고 기다린다.
+종료 코드 4 는 계정 정지·만료다(관리자에게 문의).
 
 - `/shared` 는 팀 공유 볼륨이다(팀에 배정된 사람의 모든 워크스페이스와 잡이 함께 본다). **팀원끼리 서로 지울 수 있으니
   남의 폴더는 건드리지 않는다.** 남길 것은 `/shared/users/<내 이름>/` 으로 옮긴다. 워크스페이스를 지우면 홈과 `/data` 는 사라진다.
@@ -148,7 +169,7 @@ coder ssh <워크스페이스> -- 'tail -n 50 /shared/runs/<내 이름>/resnet-l
 | code | 할 일 |
 |---|---|
 | `insufficient_scope` | 이 토큰으로는 못 한다. 사용자에게 관리자에게 쓰기 토큰을 요청하라고 안내한다 |
-| `token_expired` · `invalid_token` | 사용자에게 포털에서 새 토큰을 발급받게 한다 |
+| `token_expired` · `invalid_token` | `icrap me` 로 어느 토큰인지 본다. 읽기 토큰이면 사용자가 새로 발급하고, 쓰기 토큰이면 관리자에게 재발급을 요청한 뒤 `login` 으로 다시 입력하게 한다 |
 | `account_inactive` | 계정이 정지·만료됐다. 관리자에게 문의 |
 | `team_not_assigned` | 배치 팀 배정이 없다. 관리자에게 요청 |
 | `bad_input` | `message` 에 틀린 필드가 있다. 고쳐서 다시 낸다 |

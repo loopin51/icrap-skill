@@ -107,14 +107,19 @@ for epoch in range(start_epoch, EPOCHS):
 
 사용자가 한 번 해야 하는 일이다. 단계를 안내하고, 로그인처럼 브라우저가 필요한 단계는 사용자에게 맡긴다.
 
-1. Tailscale 에 연결한다(관리자 초대 수락). Coder 주소(아래 `<Coder 주소>`)는 관리자에게 받는다.
-   확인: `curl -s -o /dev/null -m 8 -w "%{http_code}\n" <Coder 주소>/healthz` 가 `200`.
-2. 설치(sudo 불필요): `curl -fsSL https://coder.com/install.sh | sh -s -- --method standalone --prefix "$HOME/.local"`
-3. 포털에서 워크스페이스 `열기` 를 한 번 누른다. 이 세션이 있어야 다음 로그인이 통한다(24시간 유지).
-4. `coder login <Coder 주소>` → 브라우저에 나온 토큰을 터미널에 붙여 넣는다.
+Coder 공개 주소 `https://coder.blueodor.xyz` 로 인터넷 어디서든 된다(Tailscale 불필요).
+
+1. 설치(sudo 불필요, 서버와 같은 버전): `mkdir -p ~/.local/bin && curl -fsSL -o ~/.local/bin/coder https://coder.blueodor.xyz/bin/coder-linux-amd64 && chmod +x ~/.local/bin/coder`
+   (맥 `coder-darwin-arm64`·`coder-darwin-amd64`, 윈도 `coder-windows-amd64.exe`)
+2. 포털(`https://icrap.blueodor.xyz`)에서 워크스페이스 `열기` 를 한 번 누른다. 이 세션이 있어야 다음 로그인이 통한다(24시간 유지).
+3. **사용자가 자기 터미널에서** `coder login https://coder.blueodor.xyz` → 브라우저에 나온 세션 토큰을 그 터미널에 붙여 넣는다.
+4. 확인: `python3 ~/.claude/skills/icrap-run/scripts/ws.py check` 가 `로그인됨` 과 내 워크스페이스를 보여 준다.
 5. 선택: `coder config-ssh` 를 하면 `ssh <워크스페이스>.coder`, `scp`, `rsync`, VS Code Remote-SSH 가 그대로 통한다.
 
-`coder login` 이 인증을 요구하면 3단계를 다시 한다. Coder 주소가 응답하지 않으면 Tailscale 연결을 본다.
+- CLI 세션 토큰은 워크스페이스 셸 권한이다. **대화창에 붙여 달라고 하지 않고**, 출력·저장·커밋하지 않는다.
+  사용자가 붙여 넣었다면 `coder logout`(서버에서 폐기) 뒤 다시 로그인하기를 권한다.
+- 세션은 7일 동안 유효하고 쓸 때마다 늘어난다. `coder tokens create` 토큰은 최대 7일이다. 계정이 정지·만료되면 5분 안에 막힌다.
+- `ws.py check` 가 로그인 안내를 내면 2·3단계를 다시 하게 한다.
 
 ## 워크스페이스 저장 공간
 
@@ -126,5 +131,5 @@ for epoch in range(start_epoch, EPOCHS):
 
 ## 토큰 교체
 
-활성 토큰은 2개까지다. 새 토큰을 발급 → 저장 위치를 바꿈 → 옛 토큰을 폐기하면 끊김 없이 바꿀 수 있다.
-`icrap me` 가 만료 14일 전부터 경고한다.
+활성 토큰은 2개까지다. 새 토큰을 발급 → `icrap login` 으로 입력(같은 자리를 덮어쓴다) → 옛 토큰을 포털에서 폐기하면
+끊김 없이 바꿀 수 있다. `icrap me` 가 토큰마다 만료 14일 전부터 경고한다. 쓰기 토큰의 재발급은 관리자에게 요청한다.
