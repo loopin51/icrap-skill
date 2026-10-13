@@ -55,8 +55,9 @@ def coder_env():
 
 def login_steps():
     return (f"Coder 에 로그인되어 있지 않거나 세션이 만료됐습니다. 사용자가 자기 터미널에서 직접 합니다:\n"
-            f"  1) 포털({PORTAL_URL})에 로그인해 워크스페이스 '열기' 를 한 번 누른다(Coder 세션이 생긴다)\n"
-            f"  2) coder login {coder_url()}  → 브라우저에 나온 세션 토큰을 그 터미널에 붙여 넣는다\n"
+            f"  1) coder login {coder_url()}  ('Paste your token here' 에서 기다린다. 열린 Coder 로그인 탭은 닫는다)\n"
+            f"  2) 브라우저에서 {PORTAL_URL}/coder-cli 를 열고 'Coder 세션 토큰 받기' → 나온 토큰을 그 터미널에 붙여 넣는다\n"
+            f"     (Coder 로그인 화면·GitHub 로그인으로는 들어갈 수 없다. 워크스페이스가 없어도 된다)\n"
             f"  세션 토큰은 워크스페이스 셸 권한이다. Claude 대화창에 붙여 넣지 말 것.")
 
 

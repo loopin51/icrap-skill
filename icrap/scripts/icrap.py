@@ -2,9 +2,11 @@
 """ICRAP 공개 API(/api/v1) 클라이언트. 표준 라이브러리만 쓴다(Python 3.8+).
 
 로그인(토큰 인증):
-  icrap login   토큰을 화면에 보이지 않게 입력받아 포털에 확인한 뒤 저장한다(파이프로 줘도 된다).
-                읽기 토큰(본인이 포털 → 계정 → API 토큰에서 발급)은 ~/.config/icrap/token,
-                쓰기 토큰(관리자가 발급)은 ~/.config/icrap/write-token 에 둔다. 스코프를 보고 자리를 정한다.
+  icrap login          브라우저 로그인. 화면에 나온 코드를 포털 /cli-login 에서 승인하면 읽기 토큰을 받아
+                       ~/.config/icrap/token 에 저장한다. 토큰을 복사·붙여 넣을 일이 없다(GitHub·이메일 로그인 모두 된다).
+  icrap login --paste  토큰을 화면에 보이지 않게 입력받아 포털에 확인한 뒤 저장한다(파이프로 줘도 된다).
+                       쓰기 토큰(관리자가 발급)은 이 방법으로만 넣는다 → ~/.config/icrap/write-token.
+                       어느 자리에 둘지는 스코프를 보고 정한다.
   조회는 읽기 토큰을, 잡 제출·취소와 워크스페이스 시작·정지는 쓰기 토큰을 쓴다(없으면 다른 쪽으로 대신한다).
 
 설정(환경 변수):
@@ -20,11 +22,13 @@ import argparse
 import getpass
 import json
 import os
+import socket
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 
 DEFAULT_URL = "https://icrap.blueodor.xyz"
 TOKEN_DIR = os.path.expanduser("~/.config/icrap")
@@ -35,9 +39,9 @@ WRITE_SCOPES = ("jobs:write", "workspaces:write")
 _SELF = os.path.abspath(__file__)
 _HOME = os.path.expanduser("~")
 LOGIN_CMD = "python3 " + ("~" + _SELF[len(_HOME):] if _SELF.startswith(_HOME + os.sep) else _SELF) + " login"
-LOGIN_HINT = f"터미널에서 `{LOGIN_CMD}` 을 실행해 토큰을 입력하세요"
+LOGIN_HINT = f"`{LOGIN_CMD}` 을 실행하고 화면에 나온 코드를 브라우저에서 승인하세요"
 WRITE_HINT = ("쓰기 토큰은 관리자만 발급합니다. 관리자에게 필요한 스코프(jobs:write, workspaces:write)로 발급을 요청하고, "
-              f"받은 토큰은 터미널에서 `{LOGIN_CMD}` 을 실행해 입력하세요.")
+              f"받은 토큰은 터미널에서 `{LOGIN_CMD} --paste` 를 실행해 입력하세요.")
 TERMINAL_PHASES = ("succeeded", "failed")
 MIN_POLL_SECONDS = 30  # 포털이 이미 5초마다 수집한다. 외부 폴링은 30초 이상(docs/api.md "폴링").
 
@@ -93,7 +97,7 @@ def token(write=False):
         r, w = file_token(TOKEN_FILE), file_token(WRITE_TOKEN_FILE)
         t = (w or r) if write else (r or w)
     if not t:
-        die(f"로그인되어 있지 않습니다. 포털 → 계정 → API 토큰에서 읽기 토큰을 발급하고, {LOGIN_HINT}.")
+        die(f"로그인되어 있지 않습니다. {LOGIN_HINT}.")
     if not t.startswith("rp_"):
         die("토큰 형식이 아닙니다(rp_ 로 시작해야 합니다).")
     return t
@@ -163,27 +167,12 @@ def describe(me, label):
     u, t = me["user"], me["token"]
     line = f"{label}: {u['email']} · 토큰 '{t['name']}' · 스코프 {','.join(t['scopes'])} · {t['daysRemaining']}일 남음({t['expiresAt'][:10]})"
     if t["daysRemaining"] <= 14:
-        line += "\n  ⚠️ 곧 만료됩니다. " + ("관리자에게 재발급을 요청하세요." if is_write(t["scopes"]) else "포털 → 계정 → API 토큰에서 새로 발급하세요.")
+        line += "\n  ⚠️ 곧 만료됩니다. " + ("관리자에게 재발급을 요청하세요." if is_write(t["scopes"]) else f"{LOGIN_HINT}(같은 컴퓨터면 이전 토큰이 교체됩니다).")
     return line
 
 
-def cmd_login(a):
-    if sys.stdin.isatty():
-        try:
-            raw = getpass.getpass("ICRAP API 토큰(rp_..., 입력은 화면에 보이지 않습니다): ")
-        except (EOFError, KeyboardInterrupt):
-            die("입력을 취소했습니다.")
-    else:
-        raw = sys.stdin.readline()
-    t = raw.strip()
-    if not t:
-        die(f"토큰이 입력되지 않았습니다. 대화형 입력이 안 되는 곳이면 {LOGIN_HINT}.")
-    if not t.startswith("rp_"):
-        die("토큰 형식이 아닙니다(rp_ 로 시작해야 합니다). 저장하지 않았습니다.")
-    try:
-        _, me = call("GET", "/api/v1/me", tok=t)
-    except ApiError as e:
-        die(f"포털이 이 토큰을 받지 않았습니다({e.code}). 폐기·만료되지 않았는지 포털 → 계정 → API 토큰에서 확인하세요. 저장하지 않았습니다.", 1)
+def store_token(t, me):
+    """확인을 마친 토큰을 스코프에 맞는 자리에 저장하고 무엇을 할 수 있는지 알린다. 원문은 출력하지 않는다."""
     write = is_write(me["token"]["scopes"])
     path = WRITE_TOKEN_FILE if write else TOKEN_FILE
     other_path = TOKEN_FILE if write else WRITE_TOKEN_FILE
@@ -204,9 +193,118 @@ def cmd_login(a):
               ("" if file_token(TOKEN_FILE) else " 읽기 토큰이 따로 없으므로 조회에도 씁니다."))
     else:
         print("  조회(클러스터·잡·로그·워크스페이스 목록)에 이 토큰을 씁니다. 잡 제출 같은 쓰기 작업은 이 토큰으로 할 수 없습니다.")
-        print("  " + WRITE_HINT)
+        if not file_token(WRITE_TOKEN_FILE):
+            print("  " + WRITE_HINT)
     if env_token():
         print("⚠️ ICRAP_TOKEN 환경 변수가 설정되어 있어 저장한 토큰 대신 그것을 씁니다.", file=sys.stderr)
+
+
+def cmd_login(a):
+    if a.paste:
+        return login_paste()
+    return login_browser(a)
+
+
+def login_paste():
+    if sys.stdin.isatty():
+        try:
+            raw = getpass.getpass("ICRAP API 토큰(rp_..., 입력은 화면에 보이지 않습니다): ")
+        except (EOFError, KeyboardInterrupt):
+            die("입력을 취소했습니다.")
+    else:
+        raw = sys.stdin.readline()
+    t = raw.strip()
+    if not t:
+        die(f"토큰이 입력되지 않았습니다. 읽기 토큰이면 `{LOGIN_CMD}`(브라우저 로그인)을 쓰세요.")
+    if not t.startswith("rp_"):
+        die("토큰 형식이 아닙니다(rp_ 로 시작해야 합니다). 저장하지 않았습니다.")
+    try:
+        _, me = call("GET", "/api/v1/me", tok=t)
+    except ApiError as e:
+        die(f"포털이 이 토큰을 받지 않았습니다({e.code}). 폐기·만료되지 않았는지 포털 → 계정 → API 토큰에서 확인하세요. 저장하지 않았습니다.", 1)
+    store_token(t, me)
+
+
+def public_post(path, body):
+    """토큰 없이 부르는 터미널 로그인 엔드포인트. (HTTP 상태, 본문)을 돌려주고 4xx·5xx 는 ApiError 로 올린다."""
+    req = urllib.request.Request(base_url() + path, data=json.dumps(body).encode(), method="POST")
+    req.add_header("Accept", "application/json")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as res:
+            return res.status, json.loads(res.read() or b"null")
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            err = (json.loads(raw) or {}).get("error") or {}
+        except ValueError:
+            raise ApiError(e.code, "unexpected_response", raw[:300].decode("utf-8", "replace"))
+        raise ApiError(e.code, err.get("code", "unknown"), err.get("message", ""))
+    except urllib.error.URLError as e:
+        die(f"{base_url()} 에 닿지 않습니다: {e.reason}.", 1)
+
+
+def can_open_browser():
+    # 원격(SSH) 세션이나 화면이 없는 리눅스에서는 열지 않는다. webbrowser 가 터미널용 브라우저(lynx 등)를
+    # 띄워 이 터미널을 가로챌 수 있다.
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        return False
+    if sys.platform.startswith("linux"):
+        return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    return sys.platform in ("darwin", "win32")
+
+
+LOGIN_ERRORS = {
+    "access_denied": "포털에서 이 로그인 요청을 거부했습니다.",
+    "account_inactive": "이 계정은 정지됐거나 사용 기간이 끝났습니다. 관리자에게 문의하세요.",
+    "token_limit_reached": "활성 읽기 토큰이 이미 2개입니다. 포털 → 계정 → API 토큰에서 하나를 폐기한 뒤 다시 로그인하세요.",
+    "expired_token": "코드가 만료됐습니다(10분). 다시 로그인하세요.",
+    "too_many_pending": "지금 대기 중인 로그인 요청이 너무 많습니다. 몇 분 뒤 다시 시도하세요.",
+}
+
+
+def login_browser(a):
+    client = f"{getpass.getuser()}@{socket.gethostname()}"
+    try:
+        _, start = public_post("/api/cli-login/start", {"client": client})
+    except ApiError as e:
+        die(LOGIN_ERRORS.get(e.code) or f"로그인을 시작하지 못했습니다({e.status} {e.code}).", 1)
+    url = base_url() + "/cli-login"
+    interval = max(int(start.get("interval", 5)), 5)
+    deadline = time.time() + int(start.get("expiresIn", 600))
+    print("브라우저에서 아래 주소를 열고, 포털에 로그인한 뒤 코드를 입력해 승인하세요.")
+    print(f"  주소: {url}")
+    print(f"  코드: {start['userCode']}   (10분 안에, 이 컴퓨터: {client})")
+    print("직접 실행한 로그인이 아니면 승인하지 마세요. 기다리는 중… (Ctrl+C 로 취소)", flush=True)
+    if not a.no_browser and can_open_browser():
+        try:
+            webbrowser.open(url)
+        except Exception:  # noqa: BLE001 — 열지 못해도 주소를 이미 보여 줬다
+            pass
+    try:
+        while time.time() < deadline:
+            time.sleep(interval)
+            try:
+                status, res = public_post("/api/cli-login/poll", {"deviceCode": start["deviceCode"]})
+            except ApiError as e:
+                if e.code == "slow_down":
+                    interval += 5
+                    continue
+                if e.status >= 500:
+                    continue  # 잠깐의 장애는 만료 전까지 다시 묻는다
+                die(LOGIN_ERRORS.get(e.code) or f"로그인하지 못했습니다({e.status} {e.code}).", 1)
+            if status == 200 and res.get("status") == "approved":
+                t = res["token"]
+                try:
+                    _, me = call("GET", "/api/v1/me", tok=t)
+                except ApiError as e:
+                    die(f"받은 토큰을 포털이 확인하지 못했습니다({e.code}). 다시 로그인하세요.", 1)
+                print("승인됐습니다.")
+                store_token(t, me)
+                return
+        die(LOGIN_ERRORS["expired_token"], 1)
+    except KeyboardInterrupt:
+        die("로그인을 취소했습니다.")
 
 
 def cmd_logout(a):
@@ -250,7 +348,7 @@ def cmd_me(a):
         if me:
             print(describe(me, label))
         else:
-            print(f"{label}: 쓸 수 없음({e.code}). " + ("관리자에게 재발급을 요청하세요." if "쓰기" in label else f"새로 발급해 {LOGIN_HINT}."))
+            print(f"{label}: 쓸 수 없음({e.code}). " + ("관리자에게 재발급을 요청하세요." if "쓰기" in label else f"{LOGIN_HINT}."))
     can = ["조회"] if "read" in read_scopes else []
     can += ["잡 제출·취소"] if "jobs:write" in write_scopes else []
     can += ["워크스페이스 시작·정지"] if "workspaces:write" in write_scopes else []
@@ -473,7 +571,10 @@ def main():
     def add(name, **k):
         return sub.add_parser(name, parents=[common], **k)
 
-    add("login", help="API 토큰을 입력받아 확인하고 저장한다(읽기·쓰기 자리는 스코프로 정한다)").set_defaults(fn=cmd_login)
+    s = add("login", help="브라우저에서 승인해 읽기 토큰을 받는다(--paste: 토큰을 직접 입력, 쓰기 토큰은 이쪽)")
+    s.add_argument("--paste", action="store_true", help="토큰을 입력받아 확인하고 저장한다(읽기·쓰기 자리는 스코프로 정한다)")
+    s.add_argument("--no-browser", action="store_true", help="브라우저를 자동으로 열지 않는다(주소만 보여 준다)")
+    s.set_defaults(fn=cmd_login)
     s = add("logout", help="저장한 토큰을 이 컴퓨터에서 지운다")
     s.add_argument("--read", dest="which", action="store_const", const="read", help="읽기 토큰만")
     s.add_argument("--write", dest="which", action="store_const", const="write", help="쓰기 토큰만")
@@ -530,7 +631,7 @@ def main():
         if e.code == "insufficient_scope":
             print(f"icrap: 이 작업에는 쓰기 토큰이 필요합니다. {WRITE_HINT}", file=sys.stderr)
         elif e.code in ("invalid_token", "token_expired"):
-            print(f"icrap: 토큰이 폐기됐거나 만료됐습니다. `icrap me` 로 어느 토큰인지 확인하고, 새 토큰을 받아 {LOGIN_HINT}.", file=sys.stderr)
+            print(f"icrap: 토큰이 폐기됐거나 만료됐습니다. `icrap me` 로 어느 토큰인지 확인하세요. 읽기 토큰이면 {LOGIN_HINT}.", file=sys.stderr)
         sys.exit(1)
 
 

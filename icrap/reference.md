@@ -111,8 +111,10 @@ Coder 공개 주소 `https://coder.blueodor.xyz` 로 인터넷 어디서든 된�
 
 1. 설치(sudo 불필요, 서버와 같은 버전): `mkdir -p ~/.local/bin && curl -fsSL -o ~/.local/bin/coder https://coder.blueodor.xyz/bin/coder-linux-amd64 && chmod +x ~/.local/bin/coder`
    (맥 `coder-darwin-arm64`·`coder-darwin-amd64`, 윈도 `coder-windows-amd64.exe`)
-2. 포털(`https://icrap.blueodor.xyz`)에서 워크스페이스 `열기` 를 한 번 누른다. 이 세션이 있어야 다음 로그인이 통한다(24시간 유지).
-3. **사용자가 자기 터미널에서** `coder login https://coder.blueodor.xyz` → 브라우저에 나온 세션 토큰을 그 터미널에 붙여 넣는다.
+2. **사용자가 자기 터미널에서** `coder login https://coder.blueodor.xyz` 를 실행한다(`Paste your token here` 에서 기다린다).
+3. 사용자가 브라우저에서 `https://icrap.blueodor.xyz/coder-cli` 를 열어 `Coder 세션 토큰 받기` 를 누르고, 나온 토큰을 그 터미널에 붙여 넣는다.
+   워크스페이스가 없어도 된다. Coder 로그인 화면으로는 들어갈 수 없다(포털이 만든 계정이라 비밀번호가 없고, GitHub 로 시도하면
+   `Incorrect login type`). 사용자가 그 오류를 말하면 `/coder-cli` 를 안내한다.
 4. 확인: `python3 ~/.claude/skills/icrap-run/scripts/ws.py check` 가 `로그인됨` 과 내 워크스페이스를 보여 준다.
 5. 선택: `coder config-ssh` 를 하면 `ssh <워크스페이스>.coder`, `scp`, `rsync`, VS Code Remote-SSH 가 그대로 통한다.
 
